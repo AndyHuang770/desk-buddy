@@ -2,7 +2,7 @@
 
 ## First 15 minutes
 
-Both run `npm ci`, `npm test`, and `npm run dev`. Walk through `3x-2` → hint → `3x-6` and confirm one additional completion in the parent dashboard. Read `src/types/contracts.ts` together before branching.
+Clone the repo (project files are at the repository root). Both run `npm ci`, `npm test`, and `npm run dev`. Walk through `3x-2` → hint → `3x-6` and confirm one additional completion in the parent dashboard. Read `src/types/contracts.ts` together before branching.
 
 ## Andy — platform and tutoring
 
