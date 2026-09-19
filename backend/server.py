@@ -7,14 +7,17 @@ The system prompt guides the AI to coach kids without giving away answers.
 """
 
 import os
-from flask import Flask, request, jsonify
+import struct
+import requests as http_requests
+from flask import Flask, request, jsonify, Response
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic").lower()
+AI_PROVIDER      = os.getenv("AI_PROVIDER", "anthropic").lower()
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 
 SYSTEM_PROMPT = (
     "You are Desk Buddy, a friendly homework tutor for kids aged 8-14. "
@@ -53,6 +56,70 @@ def get_reply_openai(user_message: str) -> str:
     return response.choices[0].message.content
 
 
+# ── Deepgram helpers ──────────────────────────────────────────────────────────
+
+_DG_STT_URL = "https://api.deepgram.com/v1/listen"
+_DG_TTS_URL = "https://api.deepgram.com/v1/speak"
+_SAMPLE_RATE = 16000
+
+
+def _make_wav_header(pcm_len: int, sample_rate: int = _SAMPLE_RATE,
+                     channels: int = 1, bits: int = 16) -> bytes:
+    byte_rate   = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + pcm_len, b"WAVE",
+        b"fmt ", 16, 1, channels, sample_rate,
+        byte_rate, block_align, bits,
+        b"data", pcm_len,
+    )
+
+
+def deepgram_stt(pcm_bytes: bytes,
+                 sample_rate: int = _SAMPLE_RATE,
+                 channels: int = 1,
+                 bits: int = 16) -> str:
+    """Convert raw PCM bytes to text via Deepgram nova-2."""
+    wav = _make_wav_header(len(pcm_bytes), sample_rate, channels, bits) + pcm_bytes
+    r = http_requests.post(
+        _DG_STT_URL,
+        headers={
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "audio/wav",
+        },
+        params={"model": "nova-2", "smart_format": "true", "language": "en"},
+        data=wav,
+        timeout=30,
+    )
+    r.raise_for_status()
+    alts = r.json()["results"]["channels"][0]["alternatives"]
+    return alts[0]["transcript"] if alts else ""
+
+
+def deepgram_tts(text: str) -> bytes:
+    """Convert text to raw 16-bit 16 kHz mono PCM via Deepgram Aura TTS."""
+    r = http_requests.post(
+        _DG_TTS_URL,
+        headers={
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        params={
+            "model":       "aura-asteria-en",
+            "encoding":    "linear16",
+            "sample_rate": str(_SAMPLE_RATE),
+            "channels":    "1",
+        },
+        json={"text": text},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.content  # raw PCM bytes
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(force=True, silent=True) or {}
@@ -69,6 +136,55 @@ def chat():
         return jsonify({"error": str(exc)}), 500
 
     return jsonify({"reply": reply})
+
+
+@app.route("/voice", methods=["POST"])
+def voice():
+    """
+    Accept raw 16-bit mono PCM from the ESP32, run the full pipeline:
+      PCM → Deepgram STT → AI tutor reply → Deepgram TTS → raw PCM back.
+
+    Optional request headers (ESP32 sets these):
+      X-Sample-Rate  (default 16000)
+      X-Channels     (default 1)
+      X-Bit-Depth    (default 16)
+    """
+    if not DEEPGRAM_API_KEY:
+        return jsonify({"error": "DEEPGRAM_API_KEY not set in .env"}), 500
+
+    pcm_bytes = request.data
+    if not pcm_bytes:
+        return jsonify({"error": "No audio data received"}), 400
+
+    sample_rate = int(request.headers.get("X-Sample-Rate", _SAMPLE_RATE))
+    channels    = int(request.headers.get("X-Channels",    1))
+    bits        = int(request.headers.get("X-Bit-Depth",   16))
+
+    try:
+        transcript = deepgram_stt(pcm_bytes, sample_rate, channels, bits)
+    except Exception as exc:
+        return jsonify({"error": f"STT failed: {exc}"}), 500
+
+    if not transcript.strip():
+        return jsonify({"error": "No speech detected"}), 422
+
+    print(f"[STT] '{transcript}'")
+
+    try:
+        reply = get_reply_openai(transcript) if AI_PROVIDER == "openai" \
+                else get_reply_anthropic(transcript)
+    except Exception as exc:
+        return jsonify({"error": f"LLM failed: {exc}"}), 500
+
+    print(f"[LLM] '{reply}'")
+
+    try:
+        audio_bytes = deepgram_tts(reply)
+    except Exception as exc:
+        return jsonify({"error": f"TTS failed: {exc}"}), 500
+
+    # Return raw PCM; ESP32 writes it directly to I2S
+    return Response(audio_bytes, mimetype="audio/l16; rate=16000; channels=1")
 
 
 if __name__ == "__main__":
