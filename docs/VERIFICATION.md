@@ -2,6 +2,8 @@
 
 Environment: Linux, Node.js 24.19.0, npm 11.9.0. Mac installation has not been tested in this session. Node 22+ is declared; `.nvmrc` selects 22.
 
+Repo layout note: the project lives at the repository root (not a nested `desk-buddy/` folder). Clone and run from the root.
+
 Passed:
 
 - Dependency installation and lockfile generation.
@@ -16,4 +18,4 @@ Not completed:
 - `npm audit --omit=dev --audit-level=high`: npm's advisory endpoint returned HTTP 503 maintenance. No clean security-audit claim is made. Re-run before deployment.
 - Real cloud services, cross-device access, real-child data handling, production authorization, and deployment: intentionally outside this mock starter.
 
-No build output, dependencies, local demo records, credentials, or test-generated history are included in the ZIP.
+No build output, dependencies, local demo records, credentials, or test-generated history are committed.
